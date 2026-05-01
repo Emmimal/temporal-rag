@@ -221,10 +221,10 @@ def run_comparison(query: str, corpus: list[Document]):
 
 def main():
     print("\n")
-    print("╔══════════════════════════════════════════════════════════════════════╗")
-    print("║       RAG Has No Memory of Time — I Built a Temporal Layer That Does ║")
-    print("║                    Before / After Comparison                         ║")
-    print("╚══════════════════════════════════════════════════════════════════════╝")
+    print("╔════════════════════════════════════════════════════════════════════════╗")
+    print("║RAG Is Blind to Time — I Built a Temporal Layer to Fix It in Production ║")
+    print("║                    Before / After Comparison                           ║")
+    print("╚════════════════════════════════════════════════════════════════════════╝")
 
     corpus = build_corpus()
 
