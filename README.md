@@ -3,46 +3,103 @@ A post-retrieval temporal layer for RAG systems — validity filtering, time dec
 
 # temporal-rag
 
-A post-retrieval temporal layer for RAG systems — validity filtering, time decay, document kind classification, and hybrid reranking in one pipeline.
+A pure-Python temporal awareness layer for RAG systems — validity filtering,
+time decay scoring, event boosting, and freshness-aware reranking in one
+post-retrieval pipeline.
 
-[![Python Version](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Most RAG tutorials stop at: retrieve documents, stuff them into a prompt, call the model. But vector search has no concept of time. A policy document from two years ago scores identically to the one published last week — if it uses more of the same vocabulary, it wins.
+Most RAG systems retrieve by semantic similarity alone. A document about API
+rate limits from two years ago is just as "similar" to a rate limit query as
+one from last week. If the older version has more matching tokens, it wins.
+This library adds the temporal layer that sits between the vector retriever
+and the LLM — deciding not just what is relevant, but what is **still true**.
 
-This library adds the temporal layer that sits between your vector retriever and the LLM. No retraining, no re-indexing, no new infrastructure. It works on top of any vector store.
-
-Read the full write-up on Towards Data Science → [RAG Has No Memory of Time — I Built a Temporal Layer to Fix It in Production](https://towardsdatascience.com/)
+Read the full write-up on Towards Data Science →
+**[RAG Is Blind to Time — I Built a Temporal Layer to Fix It in Production](https://towardsdatascience.com/)**
 
 ---
 
 ## What It Does
 
 ```
-Query
-  ↓
-Retriever (vector similarity, top-20)         ← unchanged
-  ↓
-Temporal Layer                                ← this library
-   ├── Validity filter     (hard-remove EXPIRED facts)
-   ├── Kind classification (STATIC / VERSIONED / EVENT)
-   ├── Time decay score    (0.5 ^ age / half_life)
-   ├── Recency score       (normalized position in pool)
-   ├── EVENT relevance gate (raw cosine floor)
-   └── Hybrid reranker     (vector + temporal combined)
-  ↓
-Re-ranked context → LLM
+Query → Retriever (vector similarity) → Temporal Layer → Re-ranked Context → LLM
+                                              ↑
+                        Validity filtering · Time decay · Event boosting
 ```
 
-Five components, one `retrieve()` call:
+The temporal layer applies eight steps before any document reaches the model:
 
-| Component | Job |
+| Step | What It Does |
 |---|---|
-| Validity filter | Hard-remove EXPIRED documents before ranking begins |
-| Kind classifier | STATIC / VERSIONED / EVENT — three problems, three fixes |
-| Time decay | `0.5 ^ (age / half_life)` — exponential decay by document age |
-| Recency scorer | Normalized freshness position within the candidate pool |
-| EVENT gate | Raw cosine floor prevents fresh-but-irrelevant events from hijacking results |
+| Validity filter | Hard-removes EXPIRED documents before scoring begins |
+| Kind classification | Labels each document STATIC / VERSIONED / EVENT |
+| Time decay | Exponential decay: `0.5 ^ (age / half_life)` |
+| Recency score | Normalized freshness within the candidate pool |
+| Validity multiplier | Boosts active EVENT signals (×1.2), zeroes EXPIRED |
+| EVENT relevance gate | Raw cosine floor prevents fresh-but-irrelevant events from hijacking results |
+| Semantic penalty | Penalizes low-similarity docs regardless of freshness |
+| Hybrid rerank | `(1−w) × vector_score + w × temporal_component` |
+
+---
+
+## The Core Idea: Two Orthogonal Axes
+
+Time in a knowledge base is not one problem — it is three. Most systems
+collapse all three into "stale documents" and apply the same treatment.
+That is a heuristic, not a model.
+
+**Axis 1 — Validity state (3 states)**
+
+```
+EXPIRED  → was true, is no longer true. Hard remove before ranking.
+VALID    → true with no active time constraint. Normal scoring.
+TEMPORAL → true within a currently active time window. Boost.
+```
+
+**Axis 2 — Document kind (3 types)**
+
+```
+STATIC    → timeless fact (definitions, math, reference material)
+VERSIONED → replaced by newer information (policies, tutorials, specs)
+EVENT     → true only within a time window (announcements, outages)
+```
+
+Only `DocumentKind.EVENT` documents can reach `ValidityState.TEMPORAL`.
+A versioned policy with a `valid_from` date is still `VALID` — not `TEMPORAL`.
+This distinction is what prevents policy_v2 from being mislabeled as a
+time-bounded event.
+
+---
+
+## Before / After
+
+Same 10-document corpus. Same query. Same embedder.
+
+```
+QUERY: What are the API rate limits? Will I get a 429 error?
+
+NAIVE RAG
+  1. [policy_v1]          age=540d | EXPIRED | sim=0.447
+  2. [announcement_today] age=0d   | valid   | sim=0.329
+  3. [tutorial_old]       age=600d | EXPIRED | sim=0.303
+
+TEMPORAL RAG
+  [announcement_today]  EVENT     ⚡ temporal  score=1.079
+    reason: Active EVENT signal (42h remaining) — overrides static sources
+  [policy_v2]           VERSIONED ✓ valid      score=0.573
+    reason: Latest version — supersedes policy_v1
+  [news_recent]         STATIC    ✓ valid      score=0.509
+    reason: Fresh, open-ended fact — high confidence
+
+  removed  : policy_v1, tutorial_old
+  surfaced : policy_v2, news_recent
+```
+
+The expired document ranked first in naive RAG. It would tell a user they
+hit 429 errors at 100 req/min when the actual limit is 1,000. Temporal RAG
+leads with the live suspension announcement and follows with the current policy.
 
 ---
 
@@ -54,57 +111,50 @@ cd temporal-rag
 pip install numpy
 ```
 
-No other dependencies. All core functionality runs on the Python standard library + numpy. The built-in embedder uses a deterministic TF-IDF approach — no API key required to run the demo.
-
-To use dense embeddings (OpenAI, sentence-transformers, Cohere), swap in your own `EmbeddingModel` subclass. See [Plugging In Your Embedder](#plugging-in-your-embedder).
+No other dependencies. The demo runs without any API key using a deterministic
+TF-IDF embedder — every output in the article is fully reproducible.
 
 ---
 
 ## Quick Start
 
 ```python
+from temporal_rag import Document, DocumentKind, TemporalRAG, TemporalConfig
 from datetime import datetime, timedelta
-from temporal_rag import Document, DocumentKind, EmbeddingModel, TemporalRAG, TemporalConfig
 
 now = datetime.now()
 
 docs = [
     Document(
-        id="policy_v1",
-        content="API rate limits are set to 100 requests per minute.",
-        created_at=now - timedelta(days=540),
-        valid_until=now - timedelta(days=180),
-        kind=DocumentKind.VERSIONED,
-    ),
-    Document(
         id="policy_v2",
-        content="API rate limits have been updated to 1000 requests per minute.",
+        content="API rate limits updated to 1000 requests per minute.",
         created_at=now - timedelta(days=175),
         valid_from=now - timedelta(days=180),
+        doc_type="policy",
         kind=DocumentKind.VERSIONED,
         supersedes_id="policy_v1",
     ),
     Document(
         id="announcement_today",
-        content="Rate limiting is suspended for the next 48 hours due to infrastructure upgrades.",
+        content="Rate limiting suspended for 48 hours due to infrastructure upgrades.",
         created_at=now - timedelta(hours=6),
         valid_until=now + timedelta(hours=42),
+        doc_type="announcement",
         kind=DocumentKind.EVENT,
     ),
 ]
 
-rag = TemporalRAG(
-    embedding_model=EmbeddingModel(),
-    temporal_config=TemporalConfig(
-        decay_half_life_days=60,
-        temporal_weight=0.40,
-        enforce_validity=True,
-    )
+config = TemporalConfig(
+    decay_half_life_days=60,
+    temporal_weight=0.40,
+    enforce_validity=True,
+    event_min_raw_vector_score=0.20,
 )
 
+rag = TemporalRAG(temporal_config=config)
 rag.index(docs)
-results = rag.retrieve("What are the current API rate limits?", top_k=3)
 
+results = rag.retrieve("What are the current API rate limits?", top_k=3)
 for r in results:
     print(r.explain())
 ```
@@ -113,52 +163,104 @@ for r in results:
 
 ## Running the Demos
 
-### Before/After comparison (the article scenarios)
-
 ```bash
+# Before / after comparison — the four scenarios from the article
 python demo.py
-```
 
-Four queries. Same 10-document corpus. Naive RAG vs temporal RAG side by side. Output includes per-document scoring breakdown and a diff of what changed.
-
-### Advanced patterns
-
-```bash
+# Advanced patterns: decay profiles, adaptive weighting,
+# freshness report, sequence-aware deduplication
 python advanced.py
 ```
 
-Covers domain-specific decay profiles, temporal query parsing, sequence-aware deduplication, and the freshness report API.
+### demo.py — Before / After (4 scenarios)
+
+| Scenario | What It Shows |
+|---|---|
+| 1 | Expired rate limit policy outranks current one in naive RAG |
+| 2 | Old research finding (7B plateau) outranks the paper that overturns it |
+| 3 | Stale layoff story surfaces without recovery news; EVENT gate blocks unrelated announcement |
+| 4 | Live suspension announcement buried at position 3 behind expired policy |
+
+### advanced.py — Extended Patterns (8 improvements)
+
+| Improvement | What It Shows |
+|---|---|
+| 1 | PAIR execution — weak docs retrieve alongside a fresher partner |
+| 2 | Confidence scoring with margin and conflict adjustments |
+| 3 | Failure logging with per-query tracking |
+| 4 | Adaptive conflict boost and confidence penalty |
+| 5 | Time-range query parsing and filtering |
+| 6 | Adaptive temporal weighting from query language signals |
+| 7 | Freshness report API — kind-aware grades and recommendations |
+| 8 | Sequence-aware deduplication — only policy_v3 reaches the LLM |
 
 ---
 
-## Configuration Reference
+## Domain-Specific Decay Profiles
+
+One half-life does not fit all content. `advanced.py` ships seven profiles:
 
 ```python
-TemporalRAG(
-    embedding_model=EmbeddingModel(),   # swap for OpenAI, sentence-transformers, etc.
-    temporal_config=TemporalConfig(
-        decay_half_life_days=30.0,      # score halves every N days
-        temporal_weight=0.35,           # 0.0 = pure vector | 1.0 = pure recency
-        enforce_validity=True,          # hard-remove documents past valid_until
-        validity_boost=1.2,             # boost multiplier for active EVENT documents
-        min_vector_score=0.15,          # normalized relevance floor (0.0 to disable)
-        event_min_raw_vector_score=0.20 # raw cosine floor for EVENT boost (see note)
-    ),
-    candidate_pool_size=20,             # how many candidates the retriever returns
-)
+DECAY_PROFILES = {
+    "breaking_news": TemporalConfig(decay_half_life_days=1,     temporal_weight=0.70),
+    "news":          TemporalConfig(decay_half_life_days=7,     temporal_weight=0.55),
+    "policy":        TemporalConfig(decay_half_life_days=90,    temporal_weight=0.45),
+    "research":      TemporalConfig(decay_half_life_days=180,   temporal_weight=0.35),
+    "legal":         TemporalConfig(decay_half_life_days=365,   temporal_weight=0.25),
+    "reference":     TemporalConfig(decay_half_life_days=1825,  temporal_weight=0.10),
+    "mathematics":   TemporalConfig(decay_half_life_days=36500, temporal_weight=0.01),
+}
 ```
 
-Tuning `hybrid_alpha` between vector and temporal:
+A proof from 1950 is as valid as one from last week.
+A breaking news item from yesterday may already be wrong.
 
-| Content type | Suggested `temporal_weight` |
-|---|---|
-| Breaking news / outages | 0.65 – 0.70 |
-| Policies / announcements | 0.40 – 0.50 |
-| Research / documentation | 0.25 – 0.35 |
-| Legal / reference | 0.10 – 0.25 |
-| Mathematics / definitions | 0.01 – 0.10 |
+---
 
-> **Calibration note:** `event_min_raw_vector_score=0.20` is tuned for TF-IDF sparse embeddings. Dense models (e.g. `text-embedding-3-small`, `all-MiniLM-L6-v2`) produce higher absolute similarity scores — recalibrate to **0.35–0.50** for dense embeddings in production.
+## Freshness Report API
+
+```python
+from advanced import freshness_report
+
+print(freshness_report(doc))
+```
+
+```
+current_policy [VERSIONED]
+  age            : 45.0 days
+  decay score    : 0.3536
+  validity state : VALID
+  grade          : D — stale
+  recommendation : Check for a newer version — VERSIONED document may have been replaced.
+```
+
+Recommendations are kind-aware, not just score-aware. A STATIC document at
+near-zero decay gets a supersession warning. A VERSIONED document gets a
+version-check warning. An active EVENT gets a window-expiry flag.
+
+---
+
+## Adaptive Weighting from Query Language
+
+```python
+from advanced import adaptive_retrieve
+
+config, weight, signal = adaptive_retrieve("What is the current rate limit?")
+# weight=0.70 — "current" triggers recency-heavy scoring
+
+config, weight, signal = adaptive_retrieve("How does cosine similarity work?")
+# weight=0.20 — no signal, baseline applies
+```
+
+```python
+TEMPORAL_SIGNALS = [
+    (r"\b(current|latest|now|today|right now)\b",  0.70),
+    (r"\b(this week|this month|recently)\b",        0.55),
+    (r"\b(still|anymore|yet|has .+ changed)\b",     0.50),
+    (r"\b(new|updated|changed|revised)\b",          0.40),
+    (r"\b(best|recommend|should I)\b",              0.35),
+]
+```
 
 ---
 
@@ -166,75 +268,71 @@ Tuning `hybrid_alpha` between vector and temporal:
 
 ```
 temporal-rag/
-├── temporal_rag.py     # Core: Document, ValidityState, DocumentKind,
-│                       #       TemporalLayer, TemporalRAG, NaiveRAG
-├── demo.py             # Before/after comparison — 4 scenarios, same corpus
-├── advanced.py         # Decay profiles, query parsing, sequence dedup,
-│                       #       freshness report API
-└── README.md
+├── temporal_rag.py   # Core: Document, DocumentKind, ValidityState,
+│                     #       TemporalConfig, TemporalLayer, TemporalRAG, NaiveRAG
+├── demo.py           # Four before/after scenarios from the article
+└── advanced.py       # Eight extended patterns: decay profiles, adaptive
+                      # weighting, freshness report, sequence deduplication
 ```
 
 ---
 
-## Performance (CPU only, 10-doc knowledge base)
+## Scoring Formula
 
-| Operation | Latency |
+```
+final_score = semantic_penalty
+            × [ (1 − w) × vector_score
+                + w × (decay_score × recency_score
+                       × validity_multiplier × event_relevance_multiplier) ]
+```
+
+| Component | Role |
 |---|---|
-| TF-IDF retrieval | ~2 ms |
-| Temporal reranking (20 candidates) | ~15–30 ms |
-| Full `retrieve()` call | ~20–35 ms |
-
-Temporal reranking is negligible compared to LLM inference time. For larger corpora, the bottleneck will be your vector store, not this layer.
-
----
-
-## Plugging In Your Embedder
-
-```python
-import numpy as np
-from temporal_rag import EmbeddingModel
-
-class OpenAIEmbedder(EmbeddingModel):
-    def __init__(self, client, model="text-embedding-3-small"):
-        self.client = client
-        self.model = model
-
-    def encode(self, text: str) -> np.ndarray:
-        response = self.client.embeddings.create(input=text, model=self.model)
-        vec = np.array(response.data[0].embedding)
-        return vec / np.linalg.norm(vec)
-
-    def encode_corpus(self, texts: list[str]) -> list[np.ndarray]:
-        return [self.encode(t) for t in texts]
-
-rag = TemporalRAG(embedding_model=OpenAIEmbedder(client))
-```
+| `vector_score` | Cosine similarity, normalized to [0, 1] within the pool |
+| `decay_score` | `0.5 ^ (age / half_life)` — approaches 0 for old documents |
+| `recency_score` | Normalized position: 1.0 for newest, 0.0 for oldest |
+| `validity_multiplier` | EXPIRED=0.0 · VALID=1.0 · TEMPORAL=1.2 |
+| `event_relevance_multiplier` | Raw cosine floor for EVENT documents (0.5× if below) |
+| `semantic_penalty` | 0.3× if normalized score below relevance threshold |
+| `w` | `temporal_weight` — balance between vector and temporal signal |
 
 ---
 
-## When to Use This
+## Calibration Notes
 
-Worth it when you have:
-- A knowledge base where documents get updated, superseded, or expire
-- Time-sensitive operational content (announcements, outages, policy changes)
-- Users asking present-tense questions against a corpus with mixed document ages
+**event_min_raw_vector_score** — The default `0.20` is tuned for TF-IDF
+sparse embeddings as used in the demo. Dense models (text-embedding-3-small,
+all-MiniLM-L6-v2) produce higher absolute similarity scores. Recalibrate to
+`0.35–0.50` for dense embeddings in production.
 
-Skip it when you have:
-- A fully static corpus that never changes
-- Single-turn queries where all documents were ingested at the same time
-- Hard latency requirements where even 20ms is unacceptable
+**temporal_weight** — Defaults to `0.35`. The demo uses `0.40`. Higher values
+favour recency; lower values favour semantic similarity. Tune per deployment.
+
+**decay_half_life_days** — The values in `DECAY_PROFILES` are starting points,
+not universal constants. Tune empirically per domain.
+
+---
+
+## Implementation Cost
+
+| Concern | Detail |
+|---|---|
+| Latency | ~15–30ms reranking overhead on a 20-candidate pool |
+| Retriever changes | Zero — the layer sits downstream of any vector search |
+| Infrastructure | No new services — pure Python post-processing |
+| Required metadata | `created_at` minimum; `valid_from`, `valid_until`, `kind` unlock the full benefit |
+
+Documents without temporal metadata are treated as `STATIC` and `VALID` —
+degrades gracefully to standard time-decay scoring.
 
 ---
 
 ## Known Limitations
 
-**Implicit expiration.** The system handles documents with explicit temporal metadata. Most real-world documents don't have this — you need to assign it at index time. LLM-based metadata extraction at ingestion or rule-based heuristics by document source are both viable approaches.
-
-**Conflicting sources.** The temporal layer ensures you get the freshest, most relevant documents. It does not resolve conflicts between them.
-
-**Embedding model calibration.** The `event_min_raw_vector_score` threshold is embedding-model-specific. Calibrate against your actual model on representative queries before going to production.
-
-**Half-life calibration.** The values in `DECAY_PROFILES` are reasonable starting points, not universal constants. Tune empirically per domain.
+- **Implicit expiration.** The system handles documents with explicit temporal metadata. Assign `kind` and expiry windows at index time. LLM-based metadata extraction at ingestion is one practical approach; rule-based heuristics by document source is another.
+- **Conflicting sources.** The temporal layer surfaces the freshest, most relevant documents. It does not resolve semantic conflicts between them.
+- **Embedding model calibration.** The `event_min_raw_vector_score` threshold is embedding-model-specific. Calibrate before going to production.
+- **Half-life calibration.** `DECAY_PROFILES` values are empirically reasonable starting points. Tune per domain.
 
 ---
 
