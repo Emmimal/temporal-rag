@@ -68,7 +68,7 @@ def build_corpus() -> list[Document]:
         # More recent research that overturns the old finding
         # Kind: STATIC (a published finding)
         Document(
-            id="research_2024",
+            id="research_2026",
             content="Recent scaling studies demonstrate consistent improvement beyond 70B "
                     "parameters, with emergent capabilities appearing at 100B+ scale. "
                     "The earlier 7B plateau finding did not account for instruction tuning.",
