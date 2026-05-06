@@ -74,6 +74,7 @@ DECAY_FLOORS = {
 def get_profile(doc_type: str) -> TemporalConfig:
     return DECAY_PROFILES.get(doc_type, DECAY_PROFILES["reference"])
 
+
 def kind_aware_decay(doc: Document, query_time: datetime, config: TemporalConfig) -> float:
     age   = doc.age_in_days(query_time)
     exp   = math.pow(0.5, age / config.decay_half_life_days)
@@ -933,7 +934,7 @@ if __name__ == "__main__":
     )
 
     log_rejection(pair_corpus[0], REJECT_OUT_OF_TIME_RANGE,
-                  "Created 2023, query scoped to 2024", query="2024 embeddings", query_id=qid_b)
+                  "Created 2023, query scoped to 2026", query="2026 embeddings", query_id=qid_b)
 
     print(f"\n  Failures for query_id={qid_a} only:")
     failure_summary(query_id=qid_a)
@@ -967,9 +968,9 @@ if __name__ == "__main__":
                  "Embeddings with HNSW indices significantly improve ANN recall.",
                  created_at=datetime(2022, 3, 1),
                  doc_type="research", kind=DocumentKind.STATIC),
-        Document("research_2024",
+        Document("research_2026",
                  "Late interaction models outperform bi-encoders on BEIR benchmarks.",
-                 created_at=datetime(2024, 1, 15),
+                 created_at=datetime(2026, 1, 15),
                  doc_type="research", kind=DocumentKind.STATIC),
     ]
 
