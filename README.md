@@ -1,9 +1,5 @@
 # temporal-rag
-A post-retrieval temporal layer for RAG systems — validity filtering, time decay, document kind classification, and hybrid reranking in one pipeline.
-
-# temporal-rag
-
-A post-retrieval temporal layer for RAG systems — validity filtering, time decay scoring, and freshness tracking that runs downstream of any vector search system.
+A post-retrieval temporal layer for RAG systems — validity filtering, time decay, and freshness tracking that runs downstream of any vector search system.
 
 ![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
