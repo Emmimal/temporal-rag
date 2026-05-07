@@ -1,0 +1,5 @@
+# Required
+numpy>=1.24.0
+
+# Optional — enables dense embedding support in advanced.py
+# sentence-transformers>=2.2.0
