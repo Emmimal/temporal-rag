@@ -7,7 +7,7 @@ A post-retrieval temporal layer for RAG systems — validity filtering, time dec
 
 Most RAG tutorials stop at: retrieve documents, rank by cosine similarity, send to the model. This library handles what comes next — deciding whether a retrieved document is still true, whether it has been superseded, and whether a fresh signal is actually relevant to the query being asked.
 
-Read the full write-up on Towards Data Science → **RAG Is Blind to Time — I Built a Temporal Layer to Fix It in Production**
+Read the full write-up on Towards Data Science → **[RAG Is Blind to Time — I Built a Temporal Layer to Fix It in Production](https://towardsdatascience.com/rag-is-blind-to-time-i-built-a-temporal-layer-to-fix-it-in-production/)**
 
 ---
 
